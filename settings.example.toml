@@ -1,0 +1,13 @@
+# settings.example.toml
+
+[branding]
+company_name = "Your Company, LLC"
+
+[xrpl]
+# "testnet" or "mainnet" (the app defaults to XRPL testnet infra)
+network = "testnet"
+
+# Use a XRPL TESTNET seed/account here for the example.
+# IMPORTANT: Do not commit real/mainnet secrets. Users will copy this to settings.toml locally.
+seed    = "TESTNET_SEED_PLACEHOLDER"
+account = "rXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
