@@ -1,0 +1,135 @@
+from dataclasses import dataclass
+from typing import Optional
+import time, binascii
+
+from xrpl.clients import JsonRpcClient
+from xrpl.wallet import Wallet
+
+from xrpl.models.transactions import Payment, TrustSet, Memo
+from xrpl.models.amounts import IssuedCurrencyAmount
+from xrpl.models.requests import AccountInfo, Tx
+# ---- xrpl-py version compatibility shim ----
+try:
+    # Newer API (>=2.0): shorter names
+    from xrpl.transaction import autofill_and_sign as _autofill_and_sign
+    from xrpl.transaction import submit_and_wait as _submit_and_wait
+except Exception:
+    # Older API: legacy names
+    from xrpl.transaction import _autofill_and_sign as _autofill_and_sign
+    from xrpl.transaction import _submit_and_wait as _submit_and_wait
+# --------------------------------------------
+from xrpl.utils import xrp_to_drops, str_to_hex
+
+XRPL_ENDPOINTS = {
+    "testnet": "https://s.altnet.rippletest.net:51234/",
+    "mainnet": "https://s1.ripple.com:51234/",
+}
+
+@dataclass
+class XRPLConfig:
+    network: str
+    seed: str
+    account: str
+
+class XRPLClient:
+    def __init__(self, cfg: XRPLConfig):
+        self.client = JsonRpcClient(XRPL_ENDPOINTS[cfg.network])
+        self.wallet = Wallet.from_seed(cfg.seed)
+        self.account = cfg.account
+
+    # ---------- Basics ----------
+    def ping(self) -> bool:
+        try:
+            req = AccountInfo(account=self.account, ledger_index="validated", strict=True)
+            resp = self.client.request(req).result
+            return "account_data" in resp
+        except Exception:
+            return False
+
+    def _wait_tx_validated(self, stx):
+        return __submit_and_wait(stx, self.client).result
+
+    def wait_tx_validated(self, tx_hash: str, timeout_s=30) -> bool:
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            try:
+                resp = self.client.request(Tx(transaction=tx_hash, binary=False)).result
+                if resp.get("validated"):
+                    return resp["meta"]["TransactionResult"] == "tesSUCCESS"
+            except Exception:
+                pass
+            time.sleep(2)
+        return False
+
+    # ---------- Issued Currency (RLUSD) Helpers ----------
+    def _has_trustline(self, issuer: str, currency: str) -> bool:
+        try:
+            lines = self.client.request(AccountLines(account=self.account)).result.get("lines", [])
+            for l in lines:
+                if l.get("account") == issuer and l.get("currency") == currency:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def ensure_trustline(self, issuer: str, currency: str, limit: str = "1000000") -> Optional[str]:
+        """
+        Ensure a trustline exists to the issuer/currency. Returns tx hash if it submits a TrustSet.
+        """
+        if self._has_trustline(issuer, currency):
+            return None
+        ts = TrustSet(
+            account=self.wallet.classic_address,
+            limit_amount=IssuedCurrencyAmount(currency=currency, issuer=issuer, value=limit),
+        )
+        stx = __autofill_and_sign(ts, self.wallet, self.client)
+        res = self._wait_tx_validated(stx)
+        return res["tx_json"]["hash"]
+
+    # ---------- Payments ----------
+    def send_demo_xrp(self, destination: str, amount_units: str, memo: str = "", anchor_hash: str = "") -> str:
+        amt_drops = xrp_to_drops(float(amount_units))
+        memos = []
+        if memo:
+            memos.append(Memo(memo_data=memo.encode().hex()))
+        if anchor_hash:
+            memos.append(Memo(memo_type=str_to_hex("vaultseal.hash"), memo_data=anchor_hash.encode().hex()))
+        tx = Payment(
+            account=self.wallet.classic_address,
+            amount=str(amt_drops),
+            destination=destination,
+            memos=memos or None,
+        )
+        stx = __autofill_and_sign(tx, self.wallet, self.client)
+        resp = self._wait_tx_validated(stx)
+        return resp["tx_json"]["hash"]
+
+    def send_iou(self, destination: str, value: str, currency: str, issuer: str, memo: str = "", anchor_hash: str = "") -> str:
+        memos = []
+        if memo:
+            memos.append(Memo(memo_data=memo.encode().hex()))
+        if anchor_hash:
+            memos.append(Memo(memo_type=str_to_hex("vaultseal.hash"), memo_data=anchor_hash.encode().hex()))
+        amount = IssuedCurrencyAmount(currency=currency, issuer=issuer, value=str(value))
+        tx = Payment(
+            account=self.wallet.classic_address,
+            amount=amount,
+            destination=destination,
+            memos=memos or None,
+        )
+        stx = __autofill_and_sign(tx, self.wallet, self.client)
+        resp = self._wait_tx_validated(stx)
+        return resp["tx_json"]["hash"]
+
+    def send_rlusd(self, destination: str, amount_units: str, memo: str = "", anchor_hash: str = "", rlusd_issuer: Optional[str]=None, rlusd_currency: Optional[str]=None) -> str:
+        """
+        Unified entrypoint used by the app:
+        - If issuer+currency provided (settings.toml [rlusd]), do IOU path (trustline + issued-currency payment)
+        - Else fallback to demo XRP payment so the flow still works.
+        """
+        if rlusd_issuer and rlusd_currency:
+            # set up trustline if needed
+            self.ensure_trustline(issuer=rlusd_issuer, currency=rlusd_currency)
+            return self.send_iou(destination, amount_units, rlusd_currency, rlusd_issuer, memo, anchor_hash)
+        # fallback demo
+        return self.send_demo_xrp(destination, amount_units, memo, anchor_hash)

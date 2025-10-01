@@ -1,0 +1,16 @@
+[app]
+env = "dev"
+
+[xrpl]
+network = "testnet"
+seed = "sEdTSW3fPtkxd6s2bamCE9cAmQyE2zd"
+account = "rL7ph59vJUwvLWPBMuUyfjUJ87gojTezFh"
+
+[branding]
+company_name = "YourCo LLC"
+logo_path = ""
+currency = "USD"
+
+[rlusd]
+issuer   = ""      # set when you have an issuer
+currency = "RLUSD"
